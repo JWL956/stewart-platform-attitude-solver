@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地设置与运行产物
+settings.json
+*.log
+output/
+DEVELOPMENT.md
+交接卡.md
+
+# 打包中间产物（dist/ 内的 exe 需上传，故不忽略 dist/）
+build/
+build_*/
+dist_*/
+*.pkg
+*.pyz
+
+# 备份、调研资料与工作记忆
+备份_*/
+.workbuddy/
+Plan/
+research/
+*.bak
+
+# 本地分析与验证报告（保留在工作区，不上传 GitHub）
+*报告_*.md
+*分析_*.md
+*规划_*.md
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

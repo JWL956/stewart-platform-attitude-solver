@@ -1,0 +1,101 @@
+{
+  "name": "6-UPS-E-P0050-12-50-DN",
+  "structure": "SPU",
+  "created": "2026-11-23 11:18:26",
+  "modified": "2026-11-24 13:28:51",
+  "note": "上虎克铰+下立式虎克铰",
+  "config": {
+    "base_radius": 240.0,
+    "platform_radius": 240.0,
+    "base_pair_angle": 81.06,
+    "platform_pair_angle": 38.94,
+    "base_phase": 30.0,
+    "platform_phase": 30.0,
+    "home_height": 337.75,
+    "base_joint_z": 65.15,
+    "platform_joint_z": 43.0,
+    "min_length": 1.0,
+    "max_length": 49.0,
+    "name": "6-UPS-E-P0050-12-50-DN",
+    "structure": "SPU",
+    "base_joint_limit": 35.0,
+    "platform_joint_limit": 35.0,
+    "stroke": 50.0,
+    "max_speed": 150.0,
+    "max_force": 1100.0,
+    "actuator_bore": 12.0,
+    "payload_mass": 50.0,
+    "platform_mass": 3.55,
+    "gravity": 9.80665,
+    "max_translation": 0.0,
+    "max_tilt": 0.0,
+    "zero_reference": "middle",
+    "actuator_names": [
+      "缸1"
+    ],
+    "actuator_codes": [
+      "IPRS12003-50-NFY-CN-NN-Y1B-alpha"
+    ],
+    "actuator_brands": [
+      "爱氪锶"
+    ],
+    "leg_strokes": null,
+    "leg_forces": null,
+    "leg_speeds": null,
+    "rated_force": 1100.0,
+    "peak_force": 3800.0,
+    "rated_speed": 150.0,
+    "peak_speed": 350.0,
+    "max_accel": 18.8,
+    "screw_lead": 3.0,
+    "rated_voltage": 220.0,
+    "rated_power": 165.0,
+    "rated_torque": 0.583568124670283,
+    "rated_current": 1.4233368894397147,
+    "peak_current": 2.26,
+    "rated_rpm": 3000.0,
+    "max_rpm": 7000.0,
+    "torque_constant": 0.41,
+    "back_emf_constant": 858.70199198121,
+    "debug_mode": true,
+    "base_axis": null,
+    "platform_axis": null,
+    "pair_centers": [
+      0.0,
+      120.0,
+      240.0
+    ],
+    "use_direct_points": false,
+    "base_points": null,
+    "platform_points": null,
+    "home_translation": null,
+    "zero_lengths": null
+  },
+  "fk_inputs": {
+    "mode": 1,
+    "absolute": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "relative": [
+      0.0,
+      0.0,
+      20.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "revolutions": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}
