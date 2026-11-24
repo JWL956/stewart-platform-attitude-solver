@@ -1477,6 +1477,17 @@ class SettingsDialog(QDialog):
         dl.addWidget(self.debug_chk)
         self.debug_warn = QLabel(""); self.debug_warn.setWordWrap(True)
         dl.addWidget(self.debug_warn)
+        # 开发板驱动方式：串口 / EtherCAT（真正切换 IO worker）
+        drv_row = QHBoxLayout(); drv_row.setSpacing(8)
+        drv_row.addWidget(label("驱动方式：", "caption"))
+        self.driver_combo = QComboBox()
+        self.driver_combo.addItem("串口（COM + 心跳）", "serial")
+        self.driver_combo.addItem("EtherCAT（pysoem + CiA 402）", "ethercat")
+        idx = self.driver_combo.findData(self._draft.get("device_driver", "serial"))
+        self.driver_combo.setCurrentIndex(max(idx, 0))
+        self.driver_combo.currentIndexChanged.connect(self._on_driver_changed)
+        drv_row.addWidget(self.driver_combo); drv_row.addStretch()
+        dl.addLayout(drv_row)
         # 开发板串口配置（留空 = 模拟模式；默认心跳 COM + 超时2秒）
         port_row = QHBoxLayout(); port_row.setSpacing(8)
         port_row.addWidget(label("开发板串口：", "caption"))
@@ -1487,7 +1498,48 @@ class SettingsDialog(QDialog):
         self.baud_edit.setFixedWidth(80)
         port_row.addWidget(label("波特率", "caption")); port_row.addWidget(self.baud_edit)
         dl.addLayout(port_row)
-        dl.addWidget(label("心跳：默认 COM 查询帧，2 秒无应答视为未连接；"
+        # EtherCAT 网卡序号（多网卡时按 pysoem 枚举顺序选择）
+        nic_row = QHBoxLayout(); nic_row.setSpacing(8)
+        nic_row.addWidget(label("EtherCAT 网卡序号：", "caption"))
+        self.nic_edit = QLineEdit(str(self._draft.get("device_nic_index", 0)))
+        self.nic_edit.setFixedWidth(60)
+        nic_row.addWidget(self.nic_edit)
+        nic_row.addStretch(); dl.addLayout(nic_row)
+        self.driver_hint = label("", "caption", wrap=True); dl.addWidget(self.driver_hint)
+        # EtherCAT 伺服对象字典配置（默认 CiA 402；不同伺服型号在此改，无需动代码）
+        od = read_settings().get("ec_od", {})
+        od_row1 = QHBoxLayout(); od_row1.setSpacing(6)
+        od_row1.addWidget(label("控制字 6040：", "caption"))
+        self.ec_control = QLineEdit(str(od.get("controlword", "6040"))); self.ec_control.setFixedWidth(64)
+        od_row1.addWidget(self.ec_control)
+        od_row1.addWidget(label("目标位置 607A：", "caption"))
+        self.ec_target = QLineEdit(str(od.get("target_pos", "607A"))); self.ec_target.setFixedWidth(64)
+        od_row1.addWidget(self.ec_target)
+        od_row1.addWidget(label("状态字：", "caption"))
+        self.ec_status = QLineEdit(str(od.get("statusword", "6041"))); self.ec_status.setFixedWidth(64)
+        od_row1.addWidget(self.ec_status); od_row1.addStretch()
+        dl.addLayout(od_row1)
+        od_row2 = QHBoxLayout(); od_row2.setSpacing(6)
+        od_row2.addWidget(label("使能值：", "caption"))
+        self.ec_enable = QLineEdit(str(od.get("enable_word", "000F"))); self.ec_enable.setFixedWidth(58)
+        od_row2.addWidget(self.ec_enable)
+        od_row2.addWidget(label("单位系数：", "caption"))
+        self.ec_scale = QLineEdit(str(od.get("pos_scale", 1.0))); self.ec_scale.setFixedWidth(58)
+        od_row2.addWidget(self.ec_scale)
+        od_row2.addWidget(label("字节数：", "caption"))
+        self.ec_bytes = QComboBox(); self.ec_bytes.addItems(["1", "2", "4"])
+        self.ec_bytes.setCurrentIndex(self.ec_bytes.findText(str(od.get("pos_bytes", 4))))
+        od_row2.addWidget(self.ec_bytes)
+        od_row2.addWidget(label("字节序：", "caption"))
+        self.ec_order = QComboBox(); self.ec_order.addItems(["little", "big"])
+        self.ec_order.setCurrentIndex(0 if str(od.get("byte_order", "little")) == "little" else 1)
+        od_row2.addWidget(self.ec_order); od_row2.addStretch()
+        dl.addLayout(od_row2)
+        self.ec_od_hint = label("对象字典地址填十六进制（如 6040）。不同伺服型号按需改；"
+                                "单位系数=目标位置单位/缸长 mm（默认 1）。", "caption", wrap=True)
+        dl.addWidget(self.ec_od_hint)
+        self._on_driver_changed()   # 初始化启用状态与提示
+        dl.addWidget(label("心跳：默认 COM 查询帧 / EtherCAT 状态字，2 秒无应答视为未连接；"
                            "右下角光点显示连接状态。", "caption", wrap=True))
         hint_b = QPushButton("去电缸管理补全数据 →"); hint_b.setObjectName("ghost")
         hint_b.clicked.connect(self._open_actuator_for_debug)
@@ -1504,6 +1556,31 @@ class SettingsDialog(QDialog):
         root.addLayout(blo)
         self.apply_theme(self.app_ref.theme_mgr.theme)
         frameless(self, "设置")
+
+    def _on_driver_changed(self):
+        """切换驱动方式时更新串口/EtherCAT 输入的可用状态与提示。"""
+        if not hasattr(self, "driver_combo"):
+            return
+        ec = self.driver_combo.currentData() == "ethercat"
+        self.port_edit.setEnabled(not ec)
+        self.baud_edit.setEnabled(not ec)
+        self.nic_edit.setEnabled(ec)
+        for w in (self.ec_control, self.ec_target, self.ec_status,
+                  self.ec_enable, self.ec_scale, self.ec_bytes, self.ec_order):
+            w.setEnabled(ec)
+        self.ec_od_hint.setVisible(ec)
+        if ec:
+            try:
+                import pysoem  # noqa: F401
+                self.driver_hint.setText(
+                    "EtherCAT：需安装 pysoem 与 Npcap，并把 6 路缸长写到从站 "
+                    "6040/607A（CiA 402）。未装库或总线上无从站时自动退回模拟模式。")
+            except ImportError:
+                self.driver_hint.setText(
+                    "⚠ 未安装 pysoem。当前选择 EtherCAT 但无法连接真实硬件，"
+                    "将按模拟模式运行；需要时 pip install pysoem 并另装 Npcap。")
+        else:
+            self.driver_hint.setText("串口：填写串口号与波特率；留空即模拟模式。")
 
     def _pick_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择默认导出文件夹", self.dir_edit.text())
@@ -1570,11 +1647,25 @@ class SettingsDialog(QDialog):
                 self._draft["glass_mode"] = glass_btn._glass_key
                 self.app_ref.theme_mgr.set_glass_mode(glass_btn._glass_key)
             self._draft["default_export_dir"] = self.dir_edit.text().strip()
+            self._draft["device_driver"] = self.driver_combo.currentData()
             self._draft["device_port"] = self.port_edit.text().strip()
             try:
                 self._draft["device_baud"] = int(self.baud_edit.text().strip() or 115200)
             except ValueError:
                 self._draft["device_baud"] = 115200
+            try:
+                self._draft["device_nic_index"] = max(0, int(self.nic_edit.text().strip() or 0))
+            except ValueError:
+                self._draft["device_nic_index"] = 0
+            self._draft["ec_od"] = {
+                "controlword": self.ec_control.text().strip() or "6040",
+                "target_pos": self.ec_target.text().strip() or "607A",
+                "statusword": self.ec_status.text().strip() or "6041",
+                "enable_word": self.ec_enable.text().strip() or "000F",
+                "pos_scale": self.ec_scale.text().strip() or "1.0",
+                "pos_bytes": int(self.ec_bytes.currentText()),
+                "byte_order": self.ec_order.currentText(),
+            }
             # 保存时二次校验调试模式，防止打开设置后数据被改
             if self.debug_chk.isChecked():
                 cfg = self._current_cfg()
@@ -1669,7 +1760,10 @@ class MainWindow(QMainWindow):
         """开发板连接光点：右下角悬浮，调试模式开启时显示。"""
         st = read_settings()
         self.link_detector = DeviceLinkDetector(
-            st.get("device_port", ""), int(st.get("device_baud", 115200)), self)
+            st.get("device_port", ""), int(st.get("device_baud", 115200)), self,
+            driver=st.get("device_driver", "serial"),
+            nic_index=int(st.get("device_nic_index", 0) or 0),
+            od_cfg=st.get("ec_od", {}))
         self.link_indicator = LinkIndicator(self.link_detector, self)
         self.link_indicator.set_theme(self.app_ref.theme_mgr.theme)
         self.link_detector.start()
@@ -1781,16 +1875,18 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dlg = SettingsDialog(self.app_ref, self)
         dlg.exec()
-        # 串口参数可能变化，重建检测器
+        # 驱动方式或串口参数可能变化，切换 worker（串口 ↔ EtherCAT）
         det = getattr(self, "link_detector", None)
         if det:
-            det.stop()
             st = read_settings()
-            det.port = st.get("device_port", "")
             try:
-                det.baud = int(st.get("device_baud", 115200))
+                baud = int(st.get("device_baud", 115200))
             except (TypeError, ValueError):
-                det.baud = 115200
+                baud = 115200
+            det.set_driver(st.get("device_driver", "serial"),
+                           st.get("device_port", ""), baud,
+                           int(st.get("device_nic_index", 0) or 0),
+                           od_cfg=st.get("ec_od", {}))
         self._set_debug_visible(read_settings().get("debug_mode", False))
 
     def _set_debug_visible(self, on: bool):
@@ -3464,7 +3560,10 @@ class MainWindow(QMainWindow):
             <tr><td><b>PySide6-Essentials / Shiboken6</b></td><td>LGPL-3.0 或 GPL-2.0/3.0（The Qt Company）</td></tr>
             <tr><td><b>PyInstaller</b></td><td>GPL-2.0 + 例外条款（仅打包工具，不进入运行时）</td></tr>
           </table><br>
-          <b>可选驱动依赖（当前版本未启用）：</b><br>
+          <b>通信驱动（在『设置 → 驱动方式』中切换）：</b><br>
+          • <b>串口（COM + 心跳）</b>：默认方式，填串口号与波特率即可；未配置时为模拟模式。<br>
+          • <b>EtherCAT（pysoem + CiA 402）</b>：在设置里选择后启用；需安装 pysoem 与 Npcap，
+            并按网卡序号枚举从站，把 6 路缸长写入 6040/607A。未装库或总线上无从站时自动退回模拟模式。<br>
           • <b>pysoem</b>（EtherCAT 主站绑定）：MIT License（v1.0.2 起）© Synapticon / pysoem contributors。<br>
           • <b>Npcap</b>（Windows 网卡驱动，需单独安装）：Npcap License（BSD 衍生）© Nmap Project。<br>
           • <b>SOEM</b>（pysoem 底层 C 栈）：GPLv3 + 商业双许可，由 RT-Labs / OpenEtherCATsociety 维护；
@@ -3753,11 +3852,15 @@ class MainWindow(QMainWindow):
             parts = [p for p in __import__("re").split(r"[,;\s]+", line) if p]
             try:
                 vals = [float(v) for v in parts[:7]]
-            except ValueError:
+            except (ValueError, OverflowError):
                 continue
-            if len(vals) < 6:
-                continue
-            dwell = int(vals[6]) if len(vals) >= 7 and vals[6] > 0 else 100
+            if len(vals) < 6 or not all(math.isfinite(v) for v in vals[:6]):
+                continue   # 忽略 nan/inf 位姿，避免逆解产生 NaN
+            try:
+                dwell = int(vals[6]) if len(vals) >= 7 and math.isfinite(vals[6]) and vals[6] > 0 else 100
+            except (ValueError, OverflowError):
+                dwell = 100
+            dwell = max(1, min(int(dwell), 600000))   # 钳制 1ms~600s，防止极端值卡死定时器
             self._traj_frames.append((np.array(vals[:6], dtype=float), dwell))
         self._traj_total = len(self._traj_frames)
         self._traj_index = 0
@@ -3769,14 +3872,21 @@ class MainWindow(QMainWindow):
         self._traj_prev_lengths = None
         for i, (vals, dwell) in enumerate(self._traj_frames):
             r = self.traj_table.rowCount(); self.traj_table.insertRow(r)
+            preview_err = ""
             if mode == 0:
-                tgt = self.config.home_pose() + vals
-                res = self.solver.inverse(tgt)
-                lengths = res.lengths
-                ok = (not str(getattr(res, "limit_warning", "") or "").startswith("⚠")
-                      and not bool(np.any(getattr(res, "joint_violations", []))))
+                try:
+                    tgt = self.config.home_pose() + vals
+                    res = self.solver.inverse(tgt)
+                    lengths = np.asarray(res.lengths, dtype=float)
+                    ok = (not str(getattr(res, "limit_warning", "") or "").startswith("⚠")
+                          and not bool(np.any(getattr(res, "joint_violations", []))))
+                    if not np.all(np.isfinite(lengths)):
+                        ok = False; preview_err = "逆解结果非有限值"
+                except Exception as ex:
+                    lengths = np.full(6, np.nan)
+                    ok = False; preview_err = f"逆解失败：{ex}"
             else:
-                lengths = vals
+                lengths = np.asarray(vals, dtype=float)
                 ok = bool(np.all(lengths >= self.config.actuator_limits()[:, 0])
                           and np.all(lengths <= self.config.actuator_limits()[:, 1]))
             # 缸速 = 相邻帧缸长差 / dwell × 1000（mm/s）
@@ -3785,13 +3895,15 @@ class MainWindow(QMainWindow):
             else:
                 leg_spd = np.abs(lengths - prev_lengths) / max(float(dwell), 1.0) * 1000.0
             prev_lengths = np.asarray(lengths, dtype=float).copy()
-            over_speed = bool(cap > 0 and np.any(leg_spd > cap + 1e-6))
-            spd = "—" if i == 0 else f"{float(np.max(leg_spd)):.1f}"
-            state = "⚠超速" if over_speed else ("✓" if ok else "⚠超限")
+            finite_spd = np.isfinite(leg_spd)
+            over_speed = bool(cap > 0 and np.any(finite_spd & (leg_spd > cap + 1e-6)))
+            spd = "—" if i == 0 or not np.any(finite_spd) else f"{float(np.max(leg_spd[finite_spd])):.1f}"
+            state = (preview_err[:12] if preview_err else
+                     ("⚠超速" if over_speed else ("✓" if ok else "⚠超限")))
             cells = [str(i + 1),
                      f"{vals[0]:.1f}, {vals[1]:.1f}, {vals[2]:.1f}" if mode == 0 else "—",
                      f"{vals[3]:.1f}, {vals[4]:.1f}, {vals[5]:.1f}" if mode == 0 else "—",
-                     ", ".join(f"{x:.1f}" for x in lengths),
+                     ", ".join((f"{x:.1f}" if math.isfinite(x) else "—") for x in lengths),
                      spd, state, str(dwell), "待播放"]
             for c_idx, txt in enumerate(cells):
                 item = QTableWidgetItem(txt)
@@ -3853,8 +3965,10 @@ class MainWindow(QMainWindow):
             else:
                 leg_spd = np.abs(lengths - prev) / max(float(dwell), 1.0) * 1000.0
             self._traj_prev_lengths = np.asarray(lengths, dtype=float).copy()
-            over_speed = bool(cap > 0 and np.any(leg_spd > cap + 1e-6))
-            spd_txt = "—" if prev is None else f"{float(np.max(leg_spd)):.1f}"
+            finite_spd = np.isfinite(leg_spd)
+            over_speed = bool(cap > 0 and np.any(finite_spd & (leg_spd > cap + 1e-6)))
+            spd_txt = ("—" if prev is None or not np.any(finite_spd)
+                       else f"{float(np.max(leg_spd[finite_spd])):.1f}")
             state_txt = "⚠超速" if over_speed else ("⚠超限" if (limit.startswith("⚠") or joint_bad) else "✓")
             row = self._traj_index - 1
             if 0 <= row < self.traj_table.rowCount():

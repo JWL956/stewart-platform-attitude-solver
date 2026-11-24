@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 import time
 from collections import deque
 from enum import Enum
@@ -142,18 +144,207 @@ class SerialWorker(QObject):
                 self.sent.emit(False, f"传输失败：{ex}")
 
 
-class DeviceLinkDetector(QObject):
-    """连接状态机 + 后台串口线程。状态变化通过 state_changed 发给 UI。
+class EtherCATWorker(QObject):
+    """EtherCAT IO 工作线程（pysoem + CiA 402 over CoE）。
 
-    对外 API 与旧版一致：start/stop/transmit/inject_signal/simulate/state/is_real/timer。
+    与 SerialWorker 同接口（setup/teardown/queueSignal/is_real + 四个信号），
+    因此 DeviceLinkDetector 的状态机无需改动即可复用。
+
+    - 惰性导入 pysoem：未安装或扫描不到从站时 is_real=False → 走模拟模式。
+    - setup() 扫描网卡、打开主站、识别从站并切到 OPERATIONAL。
+    - _tick() 周期读状态字（作为心跳应答）并排空下发队列：
+      下发帧按 6 路缸长解析，写入从站 607A（目标位置）与 6040（控制字）。
+      非数值帧（心跳等）原样忽略，仅回读状态字维持心跳。
+    - 从站索引/对象字典地址按常见 CiA 402 约定，可按实机在类常量处调整。
+    """
+
+    opened = Signal(bool, str)
+    replied = Signal(float)
+    sent = Signal(bool, str)
+    queueSignal = Signal(bytes)
+    enqueueResult = Signal(bool)
+
+    # CiA 402 常用默认值（可在设置窗口覆盖，兼容不同伺服型号）
+    DEFAULT_OD = {
+        "controlword": 0x6040,   # 控制字索引
+        "target_pos": 0x607A,    # 目标位置索引
+        "statusword": 0x6041,    # 状态字索引
+        "enable_word": 0x000F,   # 使能控制字值（shutdown+switch on+enable op）
+        "pos_scale": 1.0,        # 缸长 mm → 目标位置单位（如脉冲/mm；0 或负按 1 处理）
+        "byte_order": "little",  # 目标位置字节序 little/big
+        "pos_bytes": 4,          # 目标位置字节数 1/2/4
+        "subindex": 0,           # 对象字典子索引
+    }
+
+    @staticmethod
+    def normalize_od(cfg) -> dict:
+        """把外部配置（可能是十六进制字符串）规整为合法 OD 参数，异常回退默认。"""
+        out = dict(EtherCATWorker.DEFAULT_OD)
+        if not isinstance(cfg, dict):
+            return out
+        def hexint(v, default):
+            try:
+                if isinstance(v, str):
+                    return int(v.strip() or "0", 16) if v.strip().lower().startswith("0x") \
+                        else int(v.strip() or "0", 16)
+                return int(v)
+            except (ValueError, TypeError):
+                return default
+        for k in ("controlword", "target_pos", "statusword", "enable_word"):
+            if k in cfg:
+                out[k] = hexint(cfg[k], out[k]) & 0xFFFF
+        try:
+            sc = float(cfg.get("pos_scale", out["pos_scale"]))
+            out["pos_scale"] = sc if (math.isfinite(sc) and sc > 0) else out["pos_scale"]
+        except (ValueError, TypeError):
+            pass
+        bo = str(cfg.get("byte_order", "little")).lower()
+        out["byte_order"] = "big" if bo == "big" else "little"
+        try:
+            nb = int(cfg.get("pos_bytes", 4))
+            out["pos_bytes"] = nb if nb in (1, 2, 4) else 4
+        except (ValueError, TypeError):
+            pass
+        try:
+            si = int(cfg.get("subindex", 0))
+            out["subindex"] = si if 0 <= si <= 255 else 0
+        except (ValueError, TypeError):
+            pass
+        return out
+
+    def __init__(self, nic_index: int = 0, od_cfg=None):
+        super().__init__()
+        self.nic_index = nic_index
+        self.od = self.normalize_od(od_cfg)
+        self.master = None
+        self.slaves = []
+        self._queue = deque()
+        self._timer = None
+        self.queueSignal.connect(self._on_enqueue, Qt.QueuedConnection)
+
+    @property
+    def is_real(self) -> bool:
+        return bool(self.slaves)
+
+    @Slot()
+    def setup(self):
+        if self._timer is not None:
+            self._timer.stop(); self._timer.deleteLater(); self._timer = None
+        try:
+            import pysoem
+        except ImportError:
+            self.master = None; self.slaves = []
+            self.opened.emit(False, "未安装 pysoem（模拟模式）")
+        else:
+            try:
+                nics = pysoem.find_adapters()
+                if not nics:
+                    self.opened.emit(False, "未找到网卡（模拟模式）")
+                else:
+                    idx = min(max(int(self.nic_index), 0), len(nics) - 1)
+                    master = pysoem.Master()
+                    master.open(nics[idx].name)
+                    master.config_init()
+                    if not master.slaves:
+                        master.close()
+                        self.opened.emit(False, "总线上无从站（模拟模式）")
+                    else:
+                        master.config_map()
+                        master.state = pysoem.OP_STATE
+                        master.write_state()
+                        self.master = master
+                        self.slaves = list(master.slaves)
+                        self.opened.emit(True, "")
+            except Exception as ex:
+                try:
+                    if self.master is not None:
+                        self.master.close()
+                except Exception:
+                    pass
+                self.master = None; self.slaves = []
+                self.opened.emit(False, f"EtherCAT 初始化失败：{ex}")
+        self._timer = QTimer(self)
+        self._timer.setInterval(HEARTBEAT_INTERVAL)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    @Slot()
+    def teardown(self):
+        if self._timer is not None:
+            self._timer.stop()
+        if self.master is not None:
+            try:
+                self.master.state = 1   # INIT
+                self.master.write_state()
+                self.master.close()
+            except Exception:
+                pass
+        self.master = None; self.slaves = []
+        self._queue.clear()
+
+    def _tick(self):
+        if self.slaves:
+            self._heartbeat_once()
+        self._drain_queue()
+
+    def _heartbeat_once(self):
+        """读状态字作为应答：只要读到有效状态字即认为链路在线。"""
+        try:
+            for slv in self.slaves:
+                slv.sdo_read(self.od["statusword"], self.od["subindex"])
+            self.replied.emit(time.monotonic())
+        except Exception:
+            pass
+
+    def _on_enqueue(self, payload: bytes):
+        if len(self._queue) >= QUEUE_MAX:
+            self.enqueueResult.emit(False); return
+        self._queue.append(payload)
+        self.enqueueResult.emit(True)
+
+    def _drain_queue(self):
+        while self._queue:
+            payload = self._queue.popleft()
+            if not self.slaves:
+                self.sent.emit(False, "EtherCAT 未连接"); continue
+            try:
+                text = payload.decode("utf-8", "ignore").strip()
+                parts = [p for p in re.split(r"[,;\s]+", text) if p]
+                vals = [float(p) for p in parts[:6]]
+                if len(vals) == 6:
+                    ew = self.od["enable_word"]
+                    for i, slv in enumerate(self.slaves[:6]):
+                        slv.sdo_write(self.od["controlword"], self.od["subindex"],
+                                      bytes([ew & 0xFF, (ew >> 8) & 0xFF]))
+                        pos = int(round(vals[i] * self.od["pos_scale"]))
+                        nbytes = self.od["pos_bytes"]
+                        slv.sdo_write(self.od["target_pos"], self.od["subindex"],
+                                      int(pos).to_bytes(nbytes, self.od["byte_order"],
+                                                        signed=True))
+                self.replied.emit(time.monotonic())
+                self.sent.emit(True, "")
+            except Exception as ex:
+                self.sent.emit(False, f"EtherCAT 写入失败：{ex}")
+
+
+class DeviceLinkDetector(QObject):
+    """连接状态机 + 后台 IO 线程。状态变化通过 state_changed 发给 UI。
+
+    driver="serial"（默认）走串口心跳；driver="ethercat" 走 pysoem/EtherCAT。
+    两种 worker 接口一致，对外 API 不变：
+    start/stop/transmit/inject_signal/simulate/state/is_real/timer。
     """
 
     state_changed = Signal(object, str)   # (LinkState, message)
 
-    def __init__(self, port: str = "", baud: int = DEFAULT_BAUD, parent=None):
+    def __init__(self, port: str = "", baud: int = DEFAULT_BAUD, parent=None,
+                 driver: str = "serial", nic_index: int = 0, od_cfg=None):
         super().__init__(parent)
         self.port = port
         self.baud = baud
+        self.driver = driver            # "serial" | "ethercat"
+        self.nic_index = nic_index
+        self.od_cfg = EtherCATWorker.normalize_od(od_cfg)
         self._state = LinkState.UNCONNECTED
         self._sim_has_signal = False   # 仅模拟模式：绿色只由此标志或真实心跳驱动
         self._last_reply = 0.0
@@ -164,15 +355,64 @@ class DeviceLinkDetector(QObject):
         self.timer.setInterval(HEARTBEAT_INTERVAL)
         self.timer.timeout.connect(self._on_heartbeat_tick)
 
-        # 工作线程与 worker
+        # 工作线程与 worker（按驱动方式选择；接口一致，状态机复用）
         self._thread = QThread(self)
-        self.worker = SerialWorker(port, baud)
+        self.worker = (EtherCATWorker(nic_index, self.od_cfg) if driver == "ethercat"
+                       else SerialWorker(port, baud))
         self.worker.moveToThread(self._thread)
         self._thread.started.connect(self.worker.setup)
         self.worker.opened.connect(self._on_opened)
         self.worker.replied.connect(self._on_replied)
         self.worker.sent.connect(self._on_sent)
         self.worker.enqueueResult.connect(self._on_enqueue_result)
+
+    def set_driver(self, driver: str, port: str = "", baud: int = DEFAULT_BAUD,
+                   nic_index: int = 0, od_cfg=None):
+        """切换驱动方式（串口 ↔ EtherCAT）并更新对象字典配置。
+
+        QThread 不可换 worker 对象，因此在同一线程上 teardown 旧 worker、
+        新建 worker 并移入线程、重连全部信号。线程本身保持运行。
+        """
+        new_od = EtherCATWorker.normalize_od(od_cfg)
+        if driver == self.driver and port == self.port and baud == self.baud \
+                and nic_index == self.nic_index and new_od == self.od_cfg:
+            return
+        self.stop()
+        if self.worker is not None:
+            from PySide6.QtCore import QMetaObject
+            if self._thread.isRunning():
+                QMetaObject.invokeMethod(self.worker, "teardown", Qt.BlockingQueuedConnection)
+            else:
+                self.worker.teardown()
+            for sig, slot in ((self.worker.opened, self._on_opened),
+                              (self.worker.replied, self._on_replied),
+                              (self.worker.sent, self._on_sent),
+                              (self.worker.enqueueResult, self._on_enqueue_result)):
+                try:
+                    sig.disconnect(slot)
+                except Exception:
+                    pass
+            try:
+                self._thread.started.disconnect(self.worker.setup)
+            except Exception:
+                pass
+            self.worker.deleteLater()
+        self.driver = driver
+        self.port = port
+        self.baud = baud
+        self.nic_index = nic_index
+        self.od_cfg = new_od
+        self.worker = (EtherCATWorker(nic_index, self.od_cfg) if driver == "ethercat"
+                       else SerialWorker(port, baud))
+        self.worker.moveToThread(self._thread)
+        self._thread.started.connect(self.worker.setup)
+        self.worker.opened.connect(self._on_opened)
+        self.worker.replied.connect(self._on_replied)
+        self.worker.sent.connect(self._on_sent)
+        self.worker.enqueueResult.connect(self._on_enqueue_result)
+        self._serial_err = ""
+        self._last_reply = 0.0
+        self.start()
 
     @property
     def is_real(self) -> bool:
