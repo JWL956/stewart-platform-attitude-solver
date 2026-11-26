@@ -41,7 +41,7 @@ from viewport3d import Viewport3D
 
 APP_TITLE = "六自由度姿态解算"
 APP_VERSION = "v3.0"
-REPO_OWNER = "JWL956"                      # GitHub 用户名
+REPO_OWNER = "Bighulu"                     # GitHub 用户名
 REPO_NAME = "stewart-platform-attitude-solver"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 

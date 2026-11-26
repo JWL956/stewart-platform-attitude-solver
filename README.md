@@ -2,7 +2,7 @@
 
 面向 Stewart 六自由度并联平台的姿态解算与调试上位机。闭式逆解 + 阻尼最小二乘正解，带三维姿态预览、参数档案、批量解算、电机学参数派生、工作空间分析、CSV 轨迹播放、调试模式与开发板下发。MIT 开源。
 
-> 项目仓库：<https://github.com/JWL956/stewart-platform-attitude-solver>
+> 项目仓库：<https://github.com/Bighulu/stewart-platform-attitude-solver>
 
 ---
 
